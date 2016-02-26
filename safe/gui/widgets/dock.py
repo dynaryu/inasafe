@@ -21,6 +21,7 @@ __copyright__ = ('Copyright 2012, Australia Indonesia Facility for '
 import os
 import shutil
 import logging
+from datetime import datetime
 
 # noinspection PyPackageRequirements
 from qgis.core import (
@@ -29,14 +30,15 @@ from qgis.core import (
     QgsMapLayer,
     QgsMapLayerRegistry,
     QgsCoordinateReferenceSystem,
-    QGis)
+    QGis,
+    QgsProject,
+    QgsLayerTreeLayer)
 # noinspection PyPackageRequirements
 from PyQt4 import QtGui, QtCore
 # noinspection PyPackageRequirements
 from PyQt4.QtCore import Qt, pyqtSlot, QSettings, pyqtSignal
 
 from safe.utilities.keyword_io import KeywordIO
-from safe.utilities.help import show_context_help
 from safe.utilities.utilities import (
     get_error_message,
     impact_attribution,
@@ -58,12 +60,12 @@ from safe.utilities.qgis_utilities import (
     display_information_message_bar)
 from safe.defaults import (
     limitations,
-    default_organisation_logo_path)
+    supporters_logo_path)
 from safe.utilities.styling import (
     setRasterStyle,
     set_vector_graduated_style,
     set_vector_categorized_style)
-from safe.impact_statistics.function_options_dialog import (
+from safe.gui.tools.function_options_dialog import (
     FunctionOptionsDialog)
 from safe.common.utilities import temp_dir
 from safe.common.exceptions import ReadLayerError, TemplateLoadingError
@@ -89,11 +91,13 @@ from safe.common.exceptions import (
     InsufficientMemoryWarning)
 from safe.report.impact_report import ImpactReport
 from safe.gui.tools.about_dialog import AboutDialog
+from safe.gui.tools.help_dialog import HelpDialog
 from safe.gui.tools.impact_report_dialog import ImpactReportDialog
 from safe_extras.pydispatch import dispatcher
 from safe.utilities.analysis import Analysis
 from safe.utilities.extent import Extent
 from safe.impact_functions.impact_function_manager import ImpactFunctionManager
+from safe.utilities.unicode import get_unicode
 
 PROGRESS_UPDATE_STYLE = styles.PROGRESS_UPDATE_STYLE
 INFO_STYLE = styles.INFO_STYLE
@@ -402,7 +406,7 @@ class Dock(QtGui.QDockWidget, FORM_CLASS):
         # whether to show or not a custom Logo
         self.organisation_logo_path = settings.value(
             'inasafe/organisation_logo_path',
-            default_organisation_logo_path(),
+            supporters_logo_path(),
             type=str)
         # This is a fix for 3.0.0 change where we no longer provide Qt4
         # Qt4 resource bundles, so if the path points into a resource
@@ -413,7 +417,7 @@ class Dock(QtGui.QDockWidget, FORM_CLASS):
             invalid_path_flag = True
             settings.setValue(
                 'inasafe/organisation_logo_path',
-                default_organisation_logo_path())
+                supporters_logo_path())
 
         # Changed default to False for new users in 3.2 - see #2171
         show_logos_flag = bool(settings.value(
@@ -512,7 +516,7 @@ class Dock(QtGui.QDockWidget, FORM_CLASS):
         if logo_not_exist or invalid_logo_size:
             settings.setValue(
                 'inasafe/organisation_logo_path',
-                default_organisation_logo_path())
+                supporters_logo_path())
 
     def connect_layer_listener(self):
         """Establish a signal/slot to listen for layers loaded in QGIS.
@@ -618,25 +622,27 @@ class Dock(QtGui.QDockWidget, FORM_CLASS):
         """
         # myHazardFilename = self.getHazardLayer().source()
         # noinspection PyTypeChecker
-        hazard_keywords = str(
-            self.keyword_io.read_keywords(self.get_hazard_layer()))
+        hazard_keywords = self.keyword_io.read_keywords(
+            self.get_hazard_layer())
         # myExposureFilename = self.getExposureLayer().source()
         # noinspection PyTypeChecker
-        exposure_keywords = str(
-            self.keyword_io.read_keywords(self.get_exposure_layer()))
+        exposure_keywords = self.keyword_io.read_keywords(
+            self.get_exposure_layer())
         heading = m.Heading(
-            self.tr('No valid functions:'), **WARNING_STYLE)
+            self.tr('No valid functions'), **WARNING_STYLE)
         notes = m.Paragraph(self.tr(
             'No functions are available for the inputs you have specified. '
             'Try selecting a different combination of inputs. Please '
             'consult the user manual for details on what constitute '
             'valid inputs for a given risk function.'))
         hazard_heading = m.Heading(
-            self.tr('Hazard keywords:'), **INFO_STYLE)
-        hazard_keywords = m.Paragraph(hazard_keywords)
+            self.tr('Hazard keywords'), **INFO_STYLE)
+        hazard_keywords = KeywordIO(self.get_hazard_layer()).to_message(
+            show_header=False)
         exposure_heading = m.Heading(
-            self.tr('Exposure keywords:'), **INFO_STYLE)
-        exposure_keywords = m.Paragraph(exposure_keywords)
+            self.tr('Exposure keywords'), **INFO_STYLE)
+        exposure_keywords = KeywordIO(self.get_exposure_layer()).to_message(
+            show_header=False)
         message = m.Message(
             heading,
             notes,
@@ -1015,6 +1021,7 @@ class Dock(QtGui.QDockWidget, FORM_CLASS):
         self.restore_state()
         self.grpQuestion.setEnabled(True)
         self.grpQuestion.setVisible(True)
+        self.pbnShowQuestion.setVisible(False)
         # Note: Don't change the order of the next two lines otherwise there
         # will be a lot of unneeded looping around as the signal is handled
         self.connect_layer_listener()
@@ -1319,6 +1326,77 @@ class Dock(QtGui.QDockWidget, FORM_CLASS):
 
         return analysis
 
+    def add_above_layer(self, existing_layer, new_layer):
+        """Add a layer (e.g. impact layer) above another layer in the legend.
+
+        .. versionadded:: 3.2
+
+        .. note:: This method works in QGIS 2.4 and better only. In
+            earlier versions it will just add the layer to the top of the
+            layer stack.
+
+        .. seealso:: issue #2322
+
+        :param existing_layer: The layer which the new layer
+            should be added above.
+        :type existing_layer: QgsMapLayer
+
+        :param new_layer: The new layer being added. An assumption is made
+            that the newly added layer is not already loaded in the legend
+            or the map registry.
+        :type new_layer: QgsMapLayer
+
+        """
+        if existing_layer is None or new_layer is None:
+            return
+
+        registry = QgsMapLayerRegistry.instance()
+
+        if QGis.QGIS_VERSION_INT < 20400:
+            # True flag adds layer directly to legend
+            registry.addMapLayer(existing_layer, True)
+            return
+
+        # False flag prevents layer being added to legend
+        registry.addMapLayer(new_layer, False)
+        index = self.layer_legend_index(existing_layer)
+        LOGGER.info('Inserting layer %s at position %s' % (
+            new_layer.source(), index))
+        root = QgsProject.instance().layerTreeRoot()
+        root.insertLayer(index, new_layer)
+
+    @staticmethod
+    def layer_legend_index(layer):
+        """Find out where in the legend layer stack a layer is.
+
+        .. note:: This function requires QGIS 2.4 or greater to work. In older
+            versions it will simply return 0.
+
+        .. version_added:: 3.2
+
+        :param layer: A map layer currently loaded in the legend.
+        :type layer: QgsMapLayer
+
+        :returns: An integer representing the z-order of the given layer in
+            the legend tree. If the layer cannot be found, or the QGIS version
+            is < 2.4 it will return 0.
+        :rtype: int
+        """
+        if QGis.QGIS_VERSION_INT < 20400:
+            return 0
+
+        root = QgsProject.instance().layerTreeRoot()
+        layer_id = layer.id()
+        current_index = 0
+        nodes = root.children()
+        for node in nodes:
+            # check if the node is a layer as opposed to a group
+            if isinstance(node, QgsLayerTreeLayer):
+                if layer_id == node.layerId():
+                    return current_index
+            current_index += 1
+        return current_index
+
     def completed(self):
         """Slot activated when the process is done.
         """
@@ -1327,49 +1405,35 @@ class Dock(QtGui.QDockWidget, FORM_CLASS):
 
         # Try to run completion code
         try:
-            from datetime import datetime
-
             LOGGER.debug(datetime.now())
-            LOGGER.debug('get engine impact layer')
             LOGGER.debug(self.analysis is None)
-            engine_impact_layer = self.analysis.impact_layer
-
-            # Load impact layer into QGIS
-            qgis_impact_layer = read_impact_layer(engine_impact_layer)
-            self.layer_changed(qgis_impact_layer)
-            report = self.show_results(
-                qgis_impact_layer, engine_impact_layer)
+            report = self.show_results()
         except Exception, e:  # pylint: disable=W0703
 
             # FIXME (Ole): This branch is not covered by the tests
             self.analysis_error(e, self.tr('Error loading impact layer.'))
         else:
             # On success, display generated report
-            impact_path = qgis_impact_layer.source()
+            # impact_path = qgis_impact_layer.source()
             message = m.Message(report)
-            # message.add(m.Heading(self.tr('View processing log as HTML'),
-            # **INFO_STYLE))
-            # message.add(m.Link('file://%s' % self.wvResults.log_path))
-            # noinspection PyTypeChecker
             self.show_static_message(message)
-            self.wvResults.impact_path = impact_path
+            # self.wvResults.impact_path = impact_path
 
         self.save_state()
         self.hide_busy()
         self.analysis_done.emit(True)
 
-    def show_results(self, qgis_impact_layer, engine_impact_layer):
+    def show_results(self):
         """Helper function for slot activated when the process is done.
 
-        :param qgis_impact_layer: A QGIS layer representing the impact.
-        :type qgis_impact_layer: QgsMapLayer, QgsVectorLayer, QgsRasterLayer
-
-        :param engine_impact_layer: A safe_layer representing the impact.
-        :type engine_impact_layer: ReadLayer
+        .. versionchanged:: 3.2 - removed parameters.
 
         :returns: Provides a report for writing to the dock.
         :rtype: str
         """
+        safe_impact_layer = self.analysis.impact_layer
+        qgis_impact_layer = read_impact_layer(safe_impact_layer)
+        # self.layer_changed(qgis_impact_layer)
         keywords = self.keyword_io.read_keywords(qgis_impact_layer)
 
         # write postprocessing report to keyword
@@ -1388,11 +1452,11 @@ class Dock(QtGui.QDockWidget, FORM_CLASS):
             qgis_impact_layer, 'impact_summary'))
 
         # Get requested style for impact layer of either kind
-        style = engine_impact_layer.get_style_info()
-        style_type = engine_impact_layer.get_style_type()
+        style = safe_impact_layer.get_style_info()
+        style_type = safe_impact_layer.get_style_type()
 
         # Determine styling for QGIS layer
-        if engine_impact_layer.is_vector:
+        if safe_impact_layer.is_vector:
             LOGGER.debug('myEngineImpactLayer.is_vector')
             if not style:
                 # Set default style if possible
@@ -1404,12 +1468,10 @@ class Dock(QtGui.QDockWidget, FORM_CLASS):
                 LOGGER.debug('use graduated')
                 set_vector_graduated_style(qgis_impact_layer, style)
 
-        elif engine_impact_layer.is_raster:
+        elif safe_impact_layer.is_raster:
             LOGGER.debug('myEngineImpactLayer.is_raster')
             if not style:
                 qgis_impact_layer.setDrawingStyle("SingleBandPseudoColor")
-                # qgis_impact_layer.setColorShadingAlgorithm(
-                # QgsRasterLayer.PseudoColorShader)
             else:
                 setRasterStyle(qgis_impact_layer, style)
 
@@ -1420,13 +1482,18 @@ class Dock(QtGui.QDockWidget, FORM_CLASS):
             # noinspection PyExceptionInherit
             raise ReadLayerError(message)
 
-        # Add layers to QGIS
-        layers_to_add = []
+        # Insert the aggregation output above the input aggregation layer
         if self.show_intermediate_layers:
-            layers_to_add.append(self.analysis.aggregator.layer)
-        layers_to_add.append(qgis_impact_layer)
+            self.add_above_layer(
+                self.get_aggregation_layer(),
+                self.analysis.aggregator.layer)
+
+        # Insert the impact above the exposure
+        self.add_above_layer(
+            self.get_exposure_layer(),
+            qgis_impact_layer)
+
         active_function = self.active_impact_function
-        QgsMapLayerRegistry.instance().addMapLayers(layers_to_add)
         self.active_impact_function = active_function
         self.impact_function_parameters = \
             self.active_impact_function.parameters
@@ -1449,10 +1516,11 @@ class Dock(QtGui.QDockWidget, FORM_CLASS):
         # Return text to display in report panel
         return report
 
-    @staticmethod
-    def show_help():
-        """Load the help text into the system browser."""
-        show_context_help(context='dock')
+    def show_help(self):
+        """Open the About dialog."""
+        # noinspection PyTypeChecker
+        dialog = HelpDialog(self)
+        dialog.show()
 
     def hide_busy(self):
         """A helper function to indicate processing is done."""
@@ -1513,17 +1581,22 @@ class Dock(QtGui.QDockWidget, FORM_CLASS):
         self.grpQuestion.setEnabled(True)
         self.grpQuestion.setVisible(False)
 
-    def show_generic_keywords(self, keywords):
+    def show_generic_keywords(self, layer):
         """Show the keywords defined for the active layer.
 
         .. note:: The print button will be disabled if this method is called.
 
-        :param keywords: A keywords dictionary.
-        :type keywords: dict
+        .. versionchanged:: 3.3 - changed parameter from keywords object
+            to a layer object so that we can show extra stuff like CRS and
+            data source in the keywords.
+
+        :param layer: A QGIS layer.
+        :type layer: QgsMapLayer
         """
+        keywords = KeywordIO(layer)
         LOGGER.debug('Showing Generic Keywords')
         self.pbnPrint.setEnabled(False)
-        message = self.keyword_io.to_message(keywords)
+        message = keywords.to_message()
         # noinspection PyTypeChecker
         self.show_static_message(message)
 
@@ -1628,7 +1701,7 @@ class Dock(QtGui.QDockWidget, FORM_CLASS):
                     compare_result = compare_version(
                         keyword_version, self.inasafe_version)
                     if compare_result == 0:
-                        self.show_generic_keywords(keywords)
+                        self.show_generic_keywords(layer)
                     elif compare_result > 0:
                         # Layer has older version
                         self.show_keyword_version_message(
@@ -1846,7 +1919,7 @@ class Dock(QtGui.QDockWidget, FORM_CLASS):
             self.tr('Write to PDF'),
             os.path.join(temp_dir(), default_file_name),
             self.tr('Pdf File (*.pdf)'))
-        output_path = str(output_path)
+        output_path = get_unicode(output_path)
 
         if output_path is None or output_path == '':
             # noinspection PyTypeChecker
@@ -1862,8 +1935,8 @@ class Dock(QtGui.QDockWidget, FORM_CLASS):
 
             # Make sure the file paths can wrap nicely:
             wrapped_map_path = map_pdf_path.replace(os.sep, '<wbr>' + os.sep)
-            wrapped_table_path = table_pdf_path.replace(os.sep,
-                                                        '<wbr>' + os.sep)
+            wrapped_table_path = table_pdf_path.replace(
+                os.sep, '<wbr>' + os.sep)
             status = m.Message(
                 m.Heading(self.tr('Map Creator'), **INFO_STYLE),
                 m.Paragraph(self.tr(

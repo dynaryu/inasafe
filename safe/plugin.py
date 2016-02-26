@@ -334,7 +334,7 @@ class Plugin(object):
         self.action_toggle_rubberbands = QAction(
             QIcon(icon),
             self.tr('Toggle Scenario Outlines'), self.iface.mainWindow())
-        message = self.tr('Toggle rubber bands showing scenarion extents.')
+        message = self.tr('Toggle rubber bands showing scenario extents.')
         self.action_toggle_rubberbands.setStatusTip(message)
         self.action_toggle_rubberbands.setWhatsThis(message)
         # Set initial state
@@ -612,7 +612,7 @@ class Plugin(object):
         self.wizard.exec_()  # modal
 
     def show_function_centric_wizard(self):
-        """Show the keywords creation wizard."""
+        """Show the function centric wizard."""
         # import here only so that it is AFTER i18n set up
         from safe.gui.tools.wizard_dialog import WizardDialog
 
